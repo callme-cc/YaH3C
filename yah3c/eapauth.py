@@ -8,7 +8,7 @@ and parses received EAP packet
 __all__ = ["EAPAuth"]
 
 import socket
-import os, sys, pwd
+import os, sys, pwd,random,struct,base64,logging
 from subprocess import call
 
 from colorama import Fore, Style, init
@@ -28,6 +28,9 @@ def display_packet(packet):
     print '\tType: ' + repr(packet[12:14])
 
 class EAPAuth:
+    H3C_VERSION="EN V5.20-0408"
+    H3C_KEY="HuaWei3COM1X"
+
     def __init__(self, login_info):
         # bind the h3c client to the EAP protocal 
         self.client = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETHERTYPE_PAE))
@@ -37,7 +40,8 @@ class EAPAuth:
         self.ethernet_header = get_ethernet_header(self.mac_addr, PAE_GROUP_ADDR, ETHERTYPE_PAE)
         self.has_sent_logoff = False
         self.login_info = login_info
-        self.version_info = '\x06\x07bjQ7SE8BZ3MqHhs3clMregcDY3Y=\x20\x20'
+        # self.version_info = '\x06\x07bjQ7SE8BZ3MqHhs3clMregcDY3Y=\x20\x20'
+        self.version_info="\x06\x07"+self.encryptH3cVersion()+"\x20\x20"
 
     def send_start(self):
         # sent eapol start packet
@@ -122,7 +126,7 @@ class EAPAuth:
             else:
                 display_prompt(Fore.YELLOW, 'Got EAP Failure')
 
-                #self.display_login_message(eap_packet[10:])
+                self.display_login_message(eap_packet[10:])
             exit(-1)
         elif code == EAP_RESPONSE:
             display_prompt(Fore.YELLOW, 'Got Unknown EAP Response')
@@ -132,7 +136,7 @@ class EAPAuth:
             if reqtype == EAP_TYPE_ID:
                 display_prompt(Fore.YELLOW, 'Got EAP Request for identity')
                 self.send_response_id(id)
-                display_prompt(Fore.GREEN, 'Sending EAP response with identity = [%s]' % self.login_info['username'])
+                display_prompt(Fore.GREEN, 'Sending EAP response with identity = [%s] and version = [%s]' % (self.login_info['username'],self.version_info[2:-2]))
             elif reqtype == EAP_TYPE_H3C:
                 display_prompt(Fore.YELLOW, 'Got EAP Request for Allocation')
                 self.send_response_h3c(id)
@@ -164,6 +168,63 @@ class EAPAuth:
         except socket.error , msg:
             print "Connection error: %s" %msg
             exit(-1)
+
+    def encryptH3cVersion(self):
+        # generate 32bit random int
+        randomInt=random.getrandbits(32)
+
+        # transform the int to 8 bytes hex string
+        randomKey="%08x"%randomInt
+        logging.debug("[randomKey]"+':'.join(x.encode('hex') for x in randomKey))
+
+        # generate 16 bytes message
+        data=EAPAuth.H3C_VERSION+chr(0)+chr(0)+chr(0)
+
+        # the  1st  time  encryt data with randomKey
+        data=self.XOR(data,randomKey)
+        logging.debug("[data after the 1st time encrypt]"+':'.join(x.encode('hex') for x in data))
+
+        # transform host number to network number
+        randomInt=socket.htonl(randomInt)
+        logging.debug("[htonl random]:%x"%randomInt)
+
+        # append 4 bytes random int to data
+        data=data+struct.pack(">I", randomInt)[::-1]
+
+        # encrypt data with H3C_KEY
+        data=self.XOR(data,EAPAuth.H3C_KEY)
+        logging.debug("[data after the 2nd time encrypt]"+':'.join(x.encode('hex') for x in data))
+
+        # return data encrypt with base64
+        data=base64.b64encode(data)
+        logging.debug("[data return in base64]"+':'.join(x.encode('hex') for x in data))
+        logging.debug("[that is]"+data)
+
+        return data
+
+    def XOR(self,dataString,keyString ):
+        logging.debug("[dataString]"+':'.join(x.encode('hex') for x in dataString))
+        logging.debug("[keyString]"+':'.join(x.encode('hex') for x in keyString))
+
+        
+        # forward order xor
+        newData=""
+        for i in range(0,len(dataString)):
+             newData+=chr(ord(dataString[i])^ord(keyString[i%len(keyString)]))
+        dataString=newData
+        logging.debug("[dataString after forward xor]"+':'.join(x.encode('hex') for x in dataString))
+
+           
+        # inverse order xor 
+        newData=""
+        for i in range(0,len(dataString)):
+            newData+=chr(ord(dataString[len(dataString)-1-i])^ord(keyString[i%len(keyString)]))
+        newData=newData[::-1]
+        logging.debug("[dataString after inverse xor]"+':'.join(x.encode('hex') for x in newData))
+        return newData
+        
+
+
 
 def daemonize (stdin='/dev/null', stdout='/dev/null', stderr='/dev/null'):
 
